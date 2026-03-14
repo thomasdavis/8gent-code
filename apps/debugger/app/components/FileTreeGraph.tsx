@@ -1,282 +1,232 @@
 "use client";
 
-import { useMemo, useState, useEffect, useRef } from "react";
-
-/**
- * Real-time file tree graph that visualizes file operations as they stream in.
- *
- * Each file operation (create, modify, delete, read) animates into the tree.
- * Files pulse when touched, fade when idle. The tree builds itself as the
- * session progresses.
- */
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
+import {
+  forceSimulation,
+  forceLink,
+  forceManyBody,
+  forceCenter,
+  forceCollide,
+  forceX,
+  forceY,
+  type SimulationNodeDatum,
+  type SimulationLinkDatum,
+} from "d3-force";
 
 // ============================================
 // Types
 // ============================================
 
-interface FileEvent {
+interface FileOp {
   path: string;
   operation: "create" | "modify" | "delete" | "read";
-  timestamp: string;
+  timestamp: number;
   success: boolean;
-  stepNumber?: number;
+  step: number;
 }
 
-interface FileNode {
+interface GraphNode extends SimulationNodeDatum {
+  id: string;
   name: string;
-  path: string;
   isDir: boolean;
-  children: Map<string, FileNode>;
-  lastOp: "create" | "modify" | "delete" | "read" | null;
+  depth: number;
+  lastOp: FileOp["operation"] | null;
   lastOpTime: number;
   opCount: number;
   deleted: boolean;
+  size: number; // visual size
+}
+
+interface GraphLink extends SimulationLinkDatum<GraphNode> {
+  source: string;
+  target: string;
 }
 
 interface FileTreeGraphProps {
   entries: Array<{
     type: string;
-    toolCall?: {
-      name?: string;
-      arguments?: Record<string, unknown>;
-    };
+    toolCall?: { name?: string; arguments?: Record<string, unknown>; toolCallId?: string };
     toolName?: string;
+    toolCallId?: string;
     success?: boolean;
     timestamp?: string;
     stepNumber?: number;
-    toolCallId?: string;
-    summary?: {
-      filesCreated?: string[];
-      filesModified?: string[];
-      filesDeleted?: string[];
-    };
   }>;
   workingDirectory?: string;
 }
 
 // ============================================
-// Extract file events from session entries
+// Colors
 // ============================================
 
-function extractFileEvents(entries: FileTreeGraphProps["entries"]): FileEvent[] {
-  const events: FileEvent[] = [];
-  const toolResults = new Map<string, boolean>();
+const OP_COLORS: Record<string, string> = {
+  create: "#34d399",  // emerald-400
+  modify: "#fbbf24",  // amber-400
+  delete: "#f87171",  // red-400
+  read: "#22d3ee",    // cyan-400
+};
 
-  // First pass: collect tool results
-  for (const entry of entries) {
-    if (entry.type === "tool_result" && entry.toolCallId != null) {
-      toolResults.set(entry.toolCallId, entry.success ?? false);
-    }
+const OP_GLOW: Record<string, string> = {
+  create: "rgba(52, 211, 153, 0.4)",
+  modify: "rgba(251, 191, 36, 0.3)",
+  delete: "rgba(248, 113, 113, 0.3)",
+  read: "rgba(34, 211, 238, 0.15)",
+};
+
+function extColor(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "ts": case "tsx": return "#3b82f6";
+    case "js": case "jsx": return "#eab308";
+    case "json": return "#8b5cf6";
+    case "css": return "#ec4899";
+    case "md": return "#6b7280";
+    case "html": return "#f97316";
+    default: return "#71717a";
   }
-
-  // Second pass: extract file operations from tool calls
-  for (const entry of entries) {
-    if (entry.type !== "tool_call" || !entry.toolCall) continue;
-
-    const name = entry.toolCall.name;
-    const args = entry.toolCall.arguments || {};
-    const path = args.path as string | undefined;
-    if (!path) continue;
-
-    let operation: FileEvent["operation"] | null = null;
-    switch (name) {
-      case "write_file": operation = "create"; break;
-      case "edit_file": operation = "modify"; break;
-      case "delete_file": operation = "delete"; break;
-      case "read_file": operation = "read"; break;
-    }
-
-    if (operation) {
-      const toolCallId = (entry as any).toolCall?.toolCallId;
-      const success = toolCallId ? (toolResults.get(toolCallId) ?? true) : true;
-
-      events.push({
-        path,
-        operation,
-        timestamp: entry.timestamp || "",
-        success,
-        stepNumber: entry.stepNumber,
-      });
-    }
-  }
-
-  return events;
 }
 
 // ============================================
-// Build tree from events
+// Extract file events
 // ============================================
 
-function buildFileTree(events: FileEvent[], workDir: string): FileNode {
-  const root: FileNode = {
-    name: "/",
-    path: "",
+function extractOps(entries: FileTreeGraphProps["entries"], workDir: string): FileOp[] {
+  const ops: FileOp[] = [];
+  const results = new Map<string, boolean>();
+
+  for (const e of entries) {
+    if (e.type === "tool_result" && e.toolCallId != null) {
+      results.set(e.toolCallId, e.success ?? false);
+    }
+  }
+
+  for (const e of entries) {
+    if (e.type !== "tool_call" || !e.toolCall) continue;
+    const name = e.toolCall.name;
+    const path = e.toolCall.arguments?.path as string | undefined;
+    if (!path) continue;
+
+    let op: FileOp["operation"] | null = null;
+    if (name === "write_file") op = "create";
+    else if (name === "edit_file") op = "modify";
+    else if (name === "delete_file") op = "delete";
+    else if (name === "read_file") op = "read";
+    if (!op) continue;
+
+    let rel = path;
+    if (rel.startsWith(workDir)) rel = rel.slice(workDir.length);
+    if (rel.startsWith("/")) rel = rel.slice(1);
+    if (!rel) continue;
+
+    const tid = e.toolCall.toolCallId;
+    const success = tid ? (results.get(tid) ?? true) : true;
+
+    ops.push({
+      path: rel,
+      operation: op,
+      timestamp: e.timestamp ? new Date(e.timestamp).getTime() : Date.now(),
+      success,
+      step: e.stepNumber ?? 0,
+    });
+  }
+
+  return ops;
+}
+
+// ============================================
+// Build graph data from ops
+// ============================================
+
+function buildGraph(ops: FileOp[]): { nodes: GraphNode[]; links: GraphLink[] } {
+  const nodeMap = new Map<string, GraphNode>();
+  const links: GraphLink[] = [];
+
+  // Ensure root
+  nodeMap.set(".", {
+    id: ".",
+    name: "project",
     isDir: true,
-    children: new Map(),
+    depth: 0,
     lastOp: null,
     lastOpTime: 0,
     opCount: 0,
     deleted: false,
-  };
+    size: 18,
+  });
 
-  for (const event of events) {
-    if (!event.success) continue;
+  for (const op of ops) {
+    if (!op.success) continue;
 
-    // Normalize path relative to working directory
-    let relPath = event.path;
-    if (relPath.startsWith(workDir)) {
-      relPath = relPath.slice(workDir.length);
-    }
-    if (relPath.startsWith("/")) relPath = relPath.slice(1);
-    if (!relPath) continue;
+    const parts = op.path.split("/");
 
-    const parts = relPath.split("/");
-    let current = root;
-
-    // Build directory path
+    // Build directory chain
     for (let i = 0; i < parts.length - 1; i++) {
-      const part = parts[i];
-      if (!current.children.has(part)) {
-        current.children.set(part, {
-          name: part,
-          path: parts.slice(0, i + 1).join("/"),
+      const dirPath = parts.slice(0, i + 1).join("/");
+      const parentPath = i === 0 ? "." : parts.slice(0, i).join("/");
+
+      if (!nodeMap.has(dirPath)) {
+        nodeMap.set(dirPath, {
+          id: dirPath,
+          name: parts[i],
           isDir: true,
-          children: new Map(),
+          depth: i + 1,
           lastOp: null,
           lastOpTime: 0,
           opCount: 0,
           deleted: false,
+          size: 14,
         });
+        links.push({ source: parentPath, target: dirPath });
       }
-      current = current.children.get(part)!;
     }
 
-    // Add or update file
+    // Add file node
+    const filePath = op.path;
+    const parentPath = parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
     const fileName = parts[parts.length - 1];
-    if (!current.children.has(fileName)) {
-      current.children.set(fileName, {
+
+    if (!nodeMap.has(filePath)) {
+      nodeMap.set(filePath, {
+        id: filePath,
         name: fileName,
-        path: relPath,
         isDir: false,
-        children: new Map(),
-        lastOp: event.operation,
-        lastOpTime: Date.now(),
+        depth: parts.length,
+        lastOp: op.operation,
+        lastOpTime: op.timestamp,
         opCount: 1,
-        deleted: event.operation === "delete",
+        deleted: op.operation === "delete",
+        size: 8,
       });
+      links.push({ source: parentPath, target: filePath });
     } else {
-      const node = current.children.get(fileName)!;
-      // write_file after initial create is a modify
-      if (event.operation === "create" && node.opCount > 0) {
+      const node = nodeMap.get(filePath)!;
+      if (op.operation === "create" && node.opCount > 0) {
         node.lastOp = "modify";
       } else {
-        node.lastOp = event.operation;
+        node.lastOp = op.operation;
       }
-      node.lastOpTime = Date.now();
+      node.lastOpTime = op.timestamp;
       node.opCount++;
-      node.deleted = event.operation === "delete";
+      node.deleted = op.operation === "delete";
     }
   }
 
-  return root;
+  return { nodes: Array.from(nodeMap.values()), links };
 }
 
 // ============================================
-// Flatten tree for rendering
+// Particle system for active operations
 // ============================================
 
-interface FlatNode {
-  name: string;
-  path: string;
-  depth: number;
-  isDir: boolean;
-  isLast: boolean;
-  lastOp: FileEvent["operation"] | null;
-  lastOpTime: number;
-  opCount: number;
-  deleted: boolean;
-  hasChildren: boolean;
-}
-
-function flattenTree(node: FileNode, depth = 0, parentIsLast = true): FlatNode[] {
-  const result: FlatNode[] = [];
-  const children = Array.from(node.children.values()).sort((a, b) => {
-    // Directories first, then alphabetical
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  children.forEach((child, i) => {
-    const isLast = i === children.length - 1;
-    result.push({
-      name: child.name,
-      path: child.path,
-      depth,
-      isDir: child.isDir,
-      isLast,
-      lastOp: child.lastOp,
-      lastOpTime: child.lastOpTime,
-      opCount: child.opCount,
-      deleted: child.deleted,
-      hasChildren: child.children.size > 0,
-    });
-
-    if (child.isDir && child.children.size > 0) {
-      result.push(...flattenTree(child, depth + 1, isLast));
-    }
-  });
-
-  return result;
-}
-
-// ============================================
-// Color and icon helpers
-// ============================================
-
-function opColor(op: FileEvent["operation"] | null): string {
-  switch (op) {
-    case "create": return "text-emerald-400";
-    case "modify": return "text-amber-400";
-    case "delete": return "text-red-400";
-    case "read": return "text-cyan-400";
-    default: return "text-zinc-500";
-  }
-}
-
-function opBgPulse(op: FileEvent["operation"] | null): string {
-  switch (op) {
-    case "create": return "bg-emerald-500/10";
-    case "modify": return "bg-amber-500/10";
-    case "delete": return "bg-red-500/10";
-    case "read": return "bg-cyan-500/5";
-    default: return "";
-  }
-}
-
-function opIcon(op: FileEvent["operation"] | null): string {
-  switch (op) {
-    case "create": return "+";
-    case "modify": return "~";
-    case "delete": return "×";
-    case "read": return "○";
-    default: return " ";
-  }
-}
-
-function fileIcon(name: string, isDir: boolean): string {
-  if (isDir) return "📁";
-  const ext = name.split(".").pop()?.toLowerCase();
-  switch (ext) {
-    case "ts": case "tsx": return "🔷";
-    case "js": case "jsx": return "🟡";
-    case "json": return "📋";
-    case "css": return "🎨";
-    case "md": return "📝";
-    case "html": return "🌐";
-    case "svg": return "🖼️";
-    case "test": return "🧪";
-    default: return "📄";
-  }
+interface Particle {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  color: string;
+  size: number;
 }
 
 // ============================================
@@ -284,53 +234,296 @@ function fileIcon(name: string, isDir: boolean): string {
 // ============================================
 
 export default function FileTreeGraph({ entries, workingDirectory }: FileTreeGraphProps) {
-  const [tick, setTick] = useState(0);
-  const prevCountRef = useRef(0);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const simRef = useRef<ReturnType<typeof forceSimulation<GraphNode>> | null>(null);
+  const nodesRef = useRef<GraphNode[]>([]);
+  const linksRef = useRef<GraphLink[]>([]);
+  const particlesRef = useRef<Particle[]>([]);
+  const frameRef = useRef<number>(0);
+  const [dimensions, setDimensions] = useState({ width: 288, height: 400 });
+  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const prevOpsCountRef = useRef(0);
+  const particleIdRef = useRef(0);
 
-  // Tick for animation freshness (which files are "hot")
+  const workDir = (workingDirectory || "").replace(/\/$/, "") + "/";
+  const ops = useMemo(() => extractOps(entries, workDir), [entries, workDir]);
+  const { nodes, links } = useMemo(() => buildGraph(ops), [ops]);
+
+  // Track dimensions
   useEffect(() => {
-    const interval = setInterval(() => setTick((t) => t + 1), 2000);
-    return () => clearInterval(interval);
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect;
+      setDimensions({ width: Math.floor(width), height: Math.floor(height) });
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
   }, []);
 
-  const workDir = workingDirectory || "";
-
-  const events = useMemo(() => extractFileEvents(entries), [entries]);
-  const tree = useMemo(() => buildFileTree(events, workDir), [events, workDir]);
-  const flatNodes = useMemo(() => flattenTree(tree), [tree]);
-
-  // Count new events since last render for the activity indicator
-  const totalEvents = events.filter((e) => e.success && e.operation !== "read").length;
-  const isNew = totalEvents > prevCountRef.current;
+  // Spawn particles on new operations
   useEffect(() => {
-    prevCountRef.current = totalEvents;
-  }, [totalEvents]);
+    if (ops.length > prevOpsCountRef.current) {
+      const newOps = ops.slice(prevOpsCountRef.current);
+      for (const op of newOps) {
+        if (!op.success || op.operation === "read") continue;
+        const node = nodesRef.current.find((n) => n.id === op.path);
+        if (node && node.x != null && node.y != null) {
+          for (let i = 0; i < 6; i++) {
+            const angle = (Math.PI * 2 * i) / 6;
+            particlesRef.current.push({
+              id: particleIdRef.current++,
+              x: node.x,
+              y: node.y,
+              vx: Math.cos(angle) * (1 + Math.random()),
+              vy: Math.sin(angle) * (1 + Math.random()),
+              life: 1,
+              color: OP_COLORS[op.operation] || "#fff",
+              size: 2 + Math.random() * 2,
+            });
+          }
+        }
+      }
+    }
+    prevOpsCountRef.current = ops.length;
+  }, [ops]);
 
-  if (flatNodes.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full text-zinc-700 text-xs">
-        <div className="text-center">
-          <div className="text-2xl mb-2">🌱</div>
-          <div>Waiting for file operations...</div>
-        </div>
-      </div>
-    );
-  }
+  // Initialize / update simulation
+  useEffect(() => {
+    const { width, height } = dimensions;
+
+    // Preserve positions for existing nodes
+    const oldPositions = new Map<string, { x: number; y: number }>();
+    for (const n of nodesRef.current) {
+      if (n.x != null && n.y != null) oldPositions.set(n.id, { x: n.x, y: n.y });
+    }
+
+    // Apply old positions to new nodes
+    for (const n of nodes) {
+      const old = oldPositions.get(n.id);
+      if (old) {
+        n.x = old.x;
+        n.y = old.y;
+      }
+    }
+
+    nodesRef.current = nodes;
+    linksRef.current = links;
+
+    if (simRef.current) simRef.current.stop();
+
+    simRef.current = forceSimulation<GraphNode>(nodes)
+      .force("link", forceLink<GraphNode, GraphLink>(links).id((d) => d.id).distance(40).strength(0.8))
+      .force("charge", forceManyBody().strength(-80))
+      .force("center", forceCenter(width / 2, height / 2).strength(0.05))
+      .force("collision", forceCollide<GraphNode>().radius((d) => d.size + 4))
+      .force("x", forceX(width / 2).strength(0.02))
+      .force("y", forceY(height / 2).strength(0.02))
+      .alphaDecay(0.02)
+      .velocityDecay(0.4);
+
+    return () => {
+      simRef.current?.stop();
+    };
+  }, [nodes, links, dimensions]);
+
+  // Mouse interaction
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      let closest: GraphNode | null = null;
+      let minDist = 20;
+      for (const n of nodesRef.current) {
+        if (n.x == null || n.y == null) continue;
+        const d = Math.hypot(n.x - mx, n.y - my);
+        if (d < minDist) {
+          minDist = d;
+          closest = n;
+        }
+      }
+      setHoveredNode(closest);
+    },
+    [],
+  );
+
+  // Animation loop
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let running = true;
+
+    function draw() {
+      if (!running || !ctx || !canvas) return;
+
+      const { width, height } = dimensions;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      ctx.scale(dpr, dpr);
+
+      // Clear
+      ctx.fillStyle = "#09090b";
+      ctx.fillRect(0, 0, width, height);
+
+      const now = Date.now();
+      const nodes = nodesRef.current;
+      const links = linksRef.current;
+
+      // Draw links
+      ctx.strokeStyle = "rgba(63, 63, 70, 0.4)";
+      ctx.lineWidth = 0.5;
+      for (const link of links) {
+        const s = typeof link.source === "object" ? link.source : nodes.find((n) => n.id === link.source);
+        const t = typeof link.target === "object" ? link.target : nodes.find((n) => n.id === link.target);
+        if (!s?.x || !s?.y || !t?.x || !t?.y) continue;
+
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y);
+        ctx.lineTo(t.x, t.y);
+        ctx.stroke();
+      }
+
+      // Draw particles
+      const particles = particlesRef.current;
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.96;
+        p.vy *= 0.96;
+        p.life -= 0.02;
+
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        ctx.globalAlpha = p.life * 0.8;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Draw nodes
+      for (const node of nodes) {
+        if (node.x == null || node.y == null) continue;
+
+        const age = now - node.lastOpTime;
+        const isHot = age < 5000;
+        const pulse = age < 2000 ? Math.sin(age / 200) * 0.3 + 0.7 : 1;
+        const isHovered = hoveredNode?.id === node.id;
+
+        // Glow for hot nodes
+        if (isHot && node.lastOp && !node.isDir) {
+          const glow = OP_GLOW[node.lastOp];
+          const glowSize = node.size + 8 + (isHot ? 4 * pulse : 0);
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, glowSize, 0, Math.PI * 2);
+          ctx.fillStyle = glow;
+          ctx.fill();
+        }
+
+        // Node body
+        const r = node.size + (isHovered ? 3 : 0);
+
+        if (node.isDir) {
+          // Directory: rounded square
+          ctx.fillStyle = node.id === "." ? "#34d39933" : "#3f3f4666";
+          ctx.strokeStyle = node.id === "." ? "#34d399" : "#52525b";
+          ctx.lineWidth = 1;
+          const s = r * 1.4;
+          ctx.beginPath();
+          ctx.roundRect(node.x - s / 2, node.y - s / 2, s, s, 3);
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          // File: circle
+          const color = isHot && node.lastOp ? OP_COLORS[node.lastOp] : extColor(node.name);
+          ctx.fillStyle = node.deleted ? "#f8717133" : color;
+          ctx.globalAlpha = node.deleted ? 0.3 : 1;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+
+          // Ring for multi-touched files
+          if (node.opCount > 1) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, r + 3, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+
+        // Label
+        const label = node.name;
+        ctx.font = `${node.isDir ? "bold " : ""}${node.isDir ? 10 : 9}px monospace`;
+        ctx.textAlign = "center";
+        ctx.fillStyle = isHovered ? "#e4e4e7" : (isHot && node.lastOp ? OP_COLORS[node.lastOp] : "#71717a");
+        ctx.fillText(label, node.x, node.y + r + 12);
+
+        // Op indicator for hot files
+        if (isHot && node.lastOp && !node.isDir) {
+          const indicator = node.lastOp === "create" ? "+" : node.lastOp === "modify" ? "~" : "×";
+          ctx.font = "bold 10px monospace";
+          ctx.fillStyle = OP_COLORS[node.lastOp];
+          ctx.fillText(indicator, node.x + r + 4, node.y - 2);
+        }
+      }
+
+      // Hover tooltip
+      if (hoveredNode && hoveredNode.x != null && hoveredNode.y != null) {
+        const h = hoveredNode;
+        const text = `${h.name}${h.isDir ? "/" : ""} — ${h.opCount} ops${h.lastOp ? " (last: " + h.lastOp + ")" : ""}`;
+        ctx.font = "10px monospace";
+        const tm = ctx.measureText(text);
+        const px = Math.min(h.x, width - tm.width - 16);
+        const py = h.y - h.size - 20;
+        ctx.fillStyle = "#18181b";
+        ctx.strokeStyle = "#3f3f46";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(px - 6, py - 10, tm.width + 12, 18, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#e4e4e7";
+        ctx.fillText(text, px, py + 2);
+      }
+
+      frameRef.current = requestAnimationFrame(draw);
+    }
+
+    frameRef.current = requestAnimationFrame(draw);
+    return () => {
+      running = false;
+      cancelAnimationFrame(frameRef.current);
+    };
+  }, [dimensions, hoveredNode]);
 
   // Stats
-  const created = events.filter((e) => e.success && e.operation === "create").length;
-  const modified = events.filter((e) => e.success && e.operation === "modify").length;
-  const reads = events.filter((e) => e.success && e.operation === "read").length;
+  const created = ops.filter((o) => o.success && o.operation === "create").length;
+  const modified = ops.filter((o) => o.success && o.operation === "modify").length;
+  const reads = ops.filter((o) => o.success && o.operation === "read").length;
+  const fileCount = nodes.filter((n) => !n.isDir).length;
 
   return (
-    <div className="flex flex-col h-full">
+    <div ref={containerRef} className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-zinc-300">File Activity</span>
-          {isNew && (
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-          )}
+          <span className="text-xs font-bold text-zinc-300">File Graph</span>
+          <span className="text-[10px] text-zinc-600">{fileCount} files</span>
         </div>
         <div className="flex items-center gap-3 text-[10px]">
           <span className="text-emerald-400">+{created}</span>
@@ -339,60 +532,32 @@ export default function FileTreeGraph({ entries, workingDirectory }: FileTreeGra
         </div>
       </div>
 
-      {/* Tree */}
-      <div className="flex-1 overflow-y-auto px-2 py-1">
-        {flatNodes.map((node) => {
-          const age = Date.now() - node.lastOpTime;
-          const isHot = age < 5000;
-          const isFresh = age < 1000;
+      {/* Legend */}
+      <div className="px-3 py-1 border-b border-zinc-800/50 flex gap-3 text-[9px] flex-shrink-0">
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> created</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> modified</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block" /> deleted</span>
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-sm bg-zinc-600 inline-block" /> directory</span>
+      </div>
 
-          return (
-            <div
-              key={node.path}
-              className={`
-                flex items-center gap-1 py-[1px] rounded-sm text-[11px] font-mono
-                transition-all duration-500
-                ${isFresh ? "animate-pulse" : ""}
-                ${isHot ? opBgPulse(node.lastOp) : ""}
-                ${node.deleted ? "opacity-30 line-through" : ""}
-              `}
-              style={{ paddingLeft: `${node.depth * 16 + 4}px` }}
-            >
-              {/* Tree connector */}
-              <span className="text-zinc-700 select-none w-3">
-                {node.isLast ? "└" : "├"}
-              </span>
-
-              {/* Operation indicator */}
-              {node.lastOp && !node.isDir && (
-                <span className={`w-3 text-center ${opColor(node.lastOp)} ${isHot ? "font-bold" : ""}`}>
-                  {opIcon(node.lastOp)}
-                </span>
-              )}
-
-              {/* Icon */}
-              <span className="w-4 text-center text-[10px]">
-                {fileIcon(node.name, node.isDir)}
-              </span>
-
-              {/* Name */}
-              <span className={`
-                ${node.isDir ? "text-zinc-400" : isHot ? opColor(node.lastOp) : "text-zinc-500"}
-                ${node.isDir ? "font-medium" : ""}
-                truncate
-              `}>
-                {node.name}{node.isDir ? "/" : ""}
-              </span>
-
-              {/* Operation count badge */}
-              {node.opCount > 1 && !node.isDir && (
-                <span className="text-[9px] text-zinc-600 ml-auto">
-                  ×{node.opCount}
-                </span>
-              )}
+      {/* Canvas */}
+      <div className="flex-1 min-h-0">
+        {nodes.length <= 1 ? (
+          <div className="flex items-center justify-center h-full text-zinc-700 text-xs">
+            <div className="text-center">
+              <div className="text-2xl mb-2 animate-pulse">🌱</div>
+              <div>Waiting for file operations...</div>
             </div>
-          );
-        })}
+          </div>
+        ) : (
+          <canvas
+            ref={canvasRef}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => setHoveredNode(null)}
+            className="w-full h-full cursor-crosshair"
+            style={{ width: dimensions.width, height: dimensions.height - 60 }}
+          />
+        )}
       </div>
     </div>
   );

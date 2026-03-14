@@ -50,6 +50,9 @@ import { AppText, MutedText, Heading, Label, Inline, Stack, Divider, Spacer, Sho
 import { ProcessSidebar, ProcessDetailView, ProcessBadge } from "./components/process-panel/index.js";
 import { formatTokens } from "./lib/index.js";
 import { useProcessPanel } from "./hooks/useProcessPanel.js";
+import { useViewport } from "./hooks/useViewport.js";
+import { useChatScroll } from "./hooks/useChatScroll.js";
+import { copyToClipboardWithFallback } from "./lib/clipboard.js";
 
 // Import permission system for infinite mode
 import {
@@ -293,6 +296,11 @@ export function App({ initialCommand, args }: AppProps) {
 
   // Background process panel
   const processPanel = useProcessPanel();
+
+  // Viewport dimensions for virtual scrolling
+  const viewport = useViewport();
+  // Reserve rows: header(2) + status verb(2) + divider(1) + input(3) + status bar(2) + shortcuts(2) = ~12
+  const chatViewportHeight = Math.max(5, viewport.height - 12);
 
   // Message queue — user can type while agent is working
   const messageQueueRef = useRef<string[]>([]);
@@ -548,10 +556,12 @@ export function App({ initialCommand, args }: AppProps) {
               "  /design [task] - Get design system suggestions\n" +
               "  /plan - Show current plan status\n" +
               "  /status - Show session status\n" +
+              "  /copy - Copy last response to clipboard\n" +
               "  /clear - Clear messages\n" +
               "  /quit - Exit 8gent Code\n\n" +
               "Keyboard shortcuts:\n" +
               "  Tab - Accept ghost suggestion\n" +
+              "  Ctrl+B - Toggle process sidebar\n" +
               "  Ctrl+A - Toggle animations\n" +
               "  Ctrl+S - Toggle sound\n" +
               "  Ctrl+H - Toggle fancy header"
@@ -594,6 +604,18 @@ export function App({ initialCommand, args }: AppProps) {
               `  Sound: ${soundEnabled ? "on" : "off"}`
           );
           break;
+
+        case "copy": {
+          // Copy last assistant message to clipboard
+          const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+          if (lastAssistant) {
+            copyToClipboardWithFallback(lastAssistant.content);
+            addSystemMessage("Copied last response to clipboard.");
+          } else {
+            addSystemMessage("No assistant message to copy.");
+          }
+          break;
+        }
 
         case "clear":
           setMessages([
@@ -1158,6 +1180,7 @@ export function App({ initialCommand, args }: AppProps) {
               messages={messages}
               animateTyping={showAnimations}
               soundEnabled={soundEnabled}
+              viewportHeight={chatViewportHeight}
             />
           </Stack>
         );
@@ -1217,6 +1240,7 @@ export function App({ initialCommand, args }: AppProps) {
             messages={messages}
             animateTyping={showAnimations}
             soundEnabled={soundEnabled}
+            viewportHeight={chatViewportHeight}
           />
         );
     }

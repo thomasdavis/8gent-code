@@ -25,5 +25,13 @@ if (hasInfiniteFlag) {
 // Filter out the flag from args passed to app
 const filteredArgs = args.filter(a => a !== "--infinite" && a !== "-infinite" && a !== "-i");
 
-// Render the TUI
-render(<App initialCommand={command} args={filteredArgs.slice(1)} />);
+// Render the TUI in fullscreen (alternate screen buffer)
+// This gives us layout control: fixed header/footer, scrollable content, sidebar.
+// Without it, Ink clears terminal scrollback when content overflows.
+const { waitUntilExit } = render(
+  <App initialCommand={command} args={filteredArgs.slice(1)} />,
+  { fullscreen: true },
+);
+
+// Clean exit: ensure alternate screen is restored on all exit paths
+waitUntilExit().catch(() => {});

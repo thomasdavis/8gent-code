@@ -1,32 +1,38 @@
 /**
- * 8gent Code - Animated Message List Component
+ * 8gent Code - Message List with Virtual Scrolling
  *
- * Features:
- * - Fade in animation for new messages
- * - Typing animation for assistant responses
- * - Smooth transitions between messages
+ * Only renders the visible window of messages. Supports:
+ * - Auto-scroll to bottom on new messages
+ * - Scroll lock when user scrolls up
+ * - Scroll indicators ("↑ N more" / "↓ N more")
+ * - React.memo on message items to prevent re-renders during streaming
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, memo } from "react";
 import { Box, Text } from "ink";
 import type { Message } from "../app.js";
 import { TypingText, WordByWord } from "./typing-text.js";
-import { FadeIn, PopIn, GlowText } from "./fade-transition.js";
+import { FadeIn, PopIn } from "./fade-transition.js";
 import { useCompletionSound } from "./sound-effects.js";
 import { useADHDMode, BionicText } from "./bionic-text.js";
-import { AppText, MutedText, Label, Stack } from './primitives/index.js';
+import { AppText, MutedText, Label, Stack } from "./primitives/index.js";
+import { useChatScroll } from "../hooks/useChatScroll.js";
 
 interface MessageListProps {
   messages: Message[];
   animateTyping?: boolean;
   soundEnabled?: boolean;
+  /** Available height in rows for the message viewport */
+  viewportHeight?: number;
 }
 
 export function MessageList({
   messages,
   animateTyping = true,
   soundEnabled = false,
+  viewportHeight = 20,
 }: MessageListProps) {
+  const scroll = useChatScroll(messages.length, viewportHeight);
   const prevCountRef = useRef(messages.length);
   const [newMessageId, setNewMessageId] = useState<string | null>(null);
 
@@ -39,21 +45,49 @@ export function MessageList({
     prevCountRef.current = messages.length;
   }, [messages]);
 
+  // Slice the visible window
+  const visibleMessages = messages.slice(
+    scroll.visibleRange.start,
+    scroll.visibleRange.end,
+  );
+
   return (
-    <Box flexDirection="column" flexGrow={1}>
-      {messages.map((message, index) => (
-        <MessageItem
+    <Box flexDirection="column" flexGrow={1} overflow="hidden">
+      {/* Scroll-up indicator */}
+      {scroll.hiddenAbove > 0 && (
+        <Box paddingX={1}>
+          <MutedText>↑ {scroll.hiddenAbove} more above</MutedText>
+        </Box>
+      )}
+
+      {/* Visible messages */}
+      {visibleMessages.map((message, i) => (
+        <MemoizedMessageItem
           key={message.id}
           message={message}
           isNew={message.id === newMessageId}
           animate={animateTyping}
           soundEnabled={soundEnabled}
-          index={index}
+          index={scroll.visibleRange.start + i}
         />
       ))}
+
+      {/* Scroll-down indicator */}
+      {scroll.hiddenBelow > 0 && (
+        <Box paddingX={1}>
+          <MutedText>↓ {scroll.hiddenBelow} more below</MutedText>
+        </Box>
+      )}
     </Box>
   );
 }
+
+// Export scroll actions so app.tsx can wire keyboard shortcuts
+export { useChatScroll } from "../hooks/useChatScroll.js";
+
+// ============================================
+// Message Item (memoized to prevent re-renders)
+// ============================================
 
 interface MessageItemProps {
   message: Message;
@@ -63,7 +97,7 @@ interface MessageItemProps {
   index: number;
 }
 
-function MessageItem({
+const MemoizedMessageItem = memo(function MessageItem({
   message,
   isNew,
   animate,
@@ -73,13 +107,11 @@ function MessageItem({
   const [showContent, setShowContent] = useState(!isNew);
   const [typingComplete, setTypingComplete] = useState(!isNew || !animate);
 
-  // Play sound on completion for assistant messages
   useCompletionSound(
     typingComplete && message.role === "assistant" && isNew,
-    soundEnabled
+    soundEnabled,
   );
 
-  // Fade in the message header
   useEffect(() => {
     if (isNew) {
       const timeout = setTimeout(() => setShowContent(true), 50);
@@ -87,7 +119,7 @@ function MessageItem({
     }
   }, [isNew]);
 
-  // Tool messages render as compact inline items
+  // Tool messages: compact inline
   if (message.role === "tool") {
     return (
       <Box paddingLeft={2}>
@@ -97,24 +129,9 @@ function MessageItem({
   }
 
   const roleConfig = {
-    user: {
-      color: "yellow" as const,
-      label: "You",
-      icon: "▸",
-      labelColor: "#FFD700",
-    },
-    assistant: {
-      color: "cyan" as const,
-      label: "8gent",
-      icon: "◆",
-      labelColor: "#00FFFF",
-    },
-    system: {
-      color: "gray" as const,
-      label: "System",
-      icon: "●",
-      labelColor: "#888888",
-    },
+    user: { color: "yellow" as const, label: "You", icon: "▸" },
+    assistant: { color: "cyan" as const, label: "8gent", icon: "◆" },
+    system: { color: "cyan" as const, label: "System", icon: "●" },
   };
 
   const config = roleConfig[message.role as "user" | "assistant" | "system"];
@@ -122,31 +139,21 @@ function MessageItem({
   if (!showContent) {
     return (
       <Box marginBottom={1}>
-        <MutedText>
-          ...
-        </MutedText>
+        <MutedText>...</MutedText>
       </Box>
     );
   }
 
   return (
-    <FadeIn duration={200} delay={isNew ? index * 20 : 0}>
+    <FadeIn duration={200} delay={isNew ? Math.min(index * 20, 200) : 0}>
       <Stack marginBottom={1}>
-        {/* Message header */}
         <Box>
           <PopIn delay={isNew ? 50 : 0}>
             <Text color={config.color}>{config.icon} </Text>
           </PopIn>
-          <Label color={config.color}>
-            {config.label}
-          </Label>
-          <MutedText>
-            {" "}
-            {formatTime(message.timestamp)}
-          </MutedText>
+          <Label color={config.color}>{config.label}</Label>
+          <MutedText> {formatTime(message.timestamp)}</MutedText>
         </Box>
-
-        {/* Message content */}
         <Box paddingLeft={2}>
           <MessageContent
             content={message.content}
@@ -159,7 +166,16 @@ function MessageItem({
       </Stack>
     </FadeIn>
   );
-}
+}, (prev, next) => {
+  // Only re-render if the message itself changed or isNew changed
+  return prev.message.id === next.message.id
+    && prev.message.content === next.message.content
+    && prev.isNew === next.isNew;
+});
+
+// ============================================
+// Message Content
+// ============================================
 
 interface MessageContentProps {
   content: string;
@@ -177,33 +193,19 @@ function MessageContent({
   onTypingComplete,
 }: MessageContentProps) {
   const { enabled: adhdMode } = useADHDMode();
-
-  // Only animate typing for new assistant messages
   const shouldAnimate = isNew && animate && role === "assistant";
 
   if (shouldAnimate) {
-    // Use word-by-word for longer content, character for shorter
     if (content.length > 200) {
-      return (
-        <WordByWord text={content} speed={30} onComplete={onTypingComplete} />
-      );
+      return <WordByWord text={content} speed={30} onComplete={onTypingComplete} />;
     }
-    return (
-      <TypingText
-        text={content}
-        speed={12}
-        onComplete={onTypingComplete}
-        cursor={true}
-      />
-    );
+    return <TypingText text={content} speed={12} onComplete={onTypingComplete} cursor={true} />;
   }
 
-  // Check for code blocks and format accordingly
   if (content.includes("```")) {
     return <FormattedContent content={content} adhdMode={adhdMode} />;
   }
 
-  // Apply bionic reading if ADHD mode is enabled
   if (adhdMode) {
     return <BionicText>{content}</BionicText>;
   }
@@ -211,7 +213,10 @@ function MessageContent({
   return <AppText wrap="wrap">{content}</AppText>;
 }
 
-// Format content with code blocks
+// ============================================
+// Code Block Formatting
+// ============================================
+
 function FormattedContent({ content, adhdMode = false }: { content: string; adhdMode?: boolean }) {
   const parts = content.split(/(```[\s\S]*?```)/);
 
@@ -219,7 +224,6 @@ function FormattedContent({ content, adhdMode = false }: { content: string; adhd
     <Box flexDirection="column">
       {parts.map((part, index) => {
         if (part.startsWith("```")) {
-          // Extract language and code
           const match = part.match(/```(\w+)?\n?([\s\S]*?)```/);
           if (match) {
             const [, language, code] = match;
@@ -232,29 +236,24 @@ function FormattedContent({ content, adhdMode = false }: { content: string; adhd
                 paddingX={1}
                 marginY={1}
               >
-                {language && (
-                  <MutedText>
-                    {language}
-                  </MutedText>
-                )}
+                {language && <MutedText>{language}</MutedText>}
                 <Text color="green">{code.trim()}</Text>
               </Box>
             );
           }
         }
-        // Apply bionic reading to non-code parts if ADHD mode is enabled
         if (adhdMode) {
           return <BionicText key={index}>{part}</BionicText>;
         }
-        return (
-          <AppText key={index} wrap="wrap">
-            {part}
-          </AppText>
-        );
+        return <AppText key={index} wrap="wrap">{part}</AppText>;
       })}
     </Box>
   );
 }
+
+// ============================================
+// Helpers
+// ============================================
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("en-US", {
@@ -265,20 +264,6 @@ function formatTime(date: Date): string {
 
 // Compact message item for dense view
 export function CompactMessageItem({ message }: { message: Message }) {
-  const roleIcons: Record<string, string> = {
-    user: "→",
-    assistant: "←",
-    system: "•",
-    tool: " ",
-  };
-
-  const roleColors: Record<string, "yellow" | "cyan" | "green" | "magenta"> = {
-    user: "yellow",
-    assistant: "cyan",
-    system: "cyan",
-    tool: "magenta",
-  };
-
   if (message.role === "tool") {
     return (
       <Box paddingLeft={2}>
@@ -286,6 +271,11 @@ export function CompactMessageItem({ message }: { message: Message }) {
       </Box>
     );
   }
+
+  const roleIcons: Record<string, string> = { user: "→", assistant: "←", system: "•", tool: " " };
+  const roleColors: Record<string, "yellow" | "cyan" | "green" | "magenta"> = {
+    user: "yellow", assistant: "cyan", system: "cyan", tool: "magenta",
+  };
 
   return (
     <Box>
@@ -296,19 +286,12 @@ export function CompactMessageItem({ message }: { message: Message }) {
 }
 
 // Streaming message for real-time responses
-interface StreamingMessageProps {
-  chunks: string[];
-  isComplete: boolean;
-}
-
-export function StreamingMessage({ chunks, isComplete }: StreamingMessageProps) {
+export function StreamingMessage({ chunks, isComplete }: { chunks: string[]; isComplete: boolean }) {
   const [displayedChunks, setDisplayedChunks] = useState(0);
 
   useEffect(() => {
     if (displayedChunks < chunks.length) {
-      const timeout = setTimeout(() => {
-        setDisplayedChunks((prev) => prev + 1);
-      }, 30);
+      const timeout = setTimeout(() => setDisplayedChunks((prev) => prev + 1), 30);
       return () => clearTimeout(timeout);
     }
   }, [chunks.length, displayedChunks]);
@@ -316,12 +299,8 @@ export function StreamingMessage({ chunks, isComplete }: StreamingMessageProps) 
   return (
     <Stack marginBottom={1}>
       <Box>
-        <Label color="cyan">
-          ◆ 8gent
-        </Label>
-        {!isComplete && (
-          <Text color="cyan"> ▌</Text>
-        )}
+        <Label color="cyan">◆ 8gent</Label>
+        {!isComplete && <Text color="cyan"> ▌</Text>}
       </Box>
       <Box paddingLeft={2}>
         <AppText wrap="wrap">{chunks.slice(0, displayedChunks).join("")}</AppText>

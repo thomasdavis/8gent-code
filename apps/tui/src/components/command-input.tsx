@@ -67,7 +67,8 @@ export type SlashCommand =
   | "quarantine"
   | "toolshed"
   | "skills"
-  | "design";
+  | "design"
+  | "copy";
 
 // Processing stages for multi-step indicator
 const PROCESSING_STAGES = ["Plan", "Tools", "Execute"];
@@ -108,6 +109,11 @@ const SLASH_COMMANDS: SlashCommandDef[] = [
     name: "plan",
     aliases: ["pl"],
     description: "Show current execution plan",
+  },
+  {
+    name: "copy",
+    aliases: ["cp", "yank"],
+    description: "Copy last response to clipboard",
   },
   {
     name: "clear",

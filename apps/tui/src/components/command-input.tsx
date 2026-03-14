@@ -11,7 +11,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
-import TextInput from "ink-text-input";
+import { BufferedInput } from "./buffered-input.js";
 import Spinner from "ink-spinner";
 import { AnimatedSpinner, StatusIndicator, StepIndicator } from "./animated-spinner.js";
 import { WaveProgress } from "./progress-bar.js";
@@ -368,7 +368,7 @@ export function CommandInput({
 
         {/* Text input with ghost overlay */}
         <Box>
-          <TextInput
+          <BufferedInput
             value={value}
             onChange={setValue}
             onSubmit={handleSubmit}

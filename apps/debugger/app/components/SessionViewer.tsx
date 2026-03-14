@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import type { SessionInfo } from "../api/sessions/route";
+import FileTreeGraph from "./FileTreeGraph";
 
 interface SessionEntry {
   type: string;
@@ -319,6 +320,7 @@ export default function SessionViewer({
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [copiedJson, setCopiedJson] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [showFileTree, setShowFileTree] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -420,6 +422,16 @@ export default function SessionViewer({
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setShowFileTree((p) => !p)}
+              className={`text-[10px] px-2 py-0.5 rounded transition-colors ${
+                showFileTree
+                  ? "bg-emerald-500/20 text-emerald-400"
+                  : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              🌳 Files
+            </button>
+            <button
               onClick={() => {
                 const url = `${window.location.origin}?session=${session.sessionId}`;
                 navigator.clipboard.writeText(url);
@@ -495,19 +507,32 @@ export default function SessionViewer({
         </div>
       </div>
 
-      {/* Entries */}
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto"
-      >
-        {filtered.map((entry, i) => (
-          <EntryContent
-            key={`${entry.sequenceNumber ?? i}-${i}`}
-            entry={entry}
-          />
-        ))}
-        <div ref={bottomRef} />
+      {/* Main content: entries + optional file tree */}
+      <div className="flex flex-1 min-h-0">
+        {/* Entries */}
+        <div
+          ref={containerRef}
+          onScroll={handleScroll}
+          className={`flex-1 overflow-y-auto ${showFileTree ? "border-r border-zinc-800" : ""}`}
+        >
+          {filtered.map((entry, i) => (
+            <EntryContent
+              key={`${entry.sequenceNumber ?? i}-${i}`}
+              entry={entry}
+            />
+          ))}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* File tree panel */}
+        {showFileTree && (
+          <div className="w-72 flex-shrink-0 overflow-hidden bg-zinc-950/30">
+            <FileTreeGraph
+              entries={entries}
+              workingDirectory={session.workingDirectory || undefined}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

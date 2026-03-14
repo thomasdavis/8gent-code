@@ -9,9 +9,9 @@
  * - Slash command support (/kanban, /predict, /avenues)
  */
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput } from "ink";
-import { BufferedInput } from "./buffered-input.js";
+import { BufferedInput, type BufferedInputHandle } from "./buffered-input.js";
 import Spinner from "ink-spinner";
 import { AnimatedSpinner, StatusIndicator, StepIndicator } from "./animated-spinner.js";
 import { WaveProgress } from "./progress-bar.js";
@@ -236,6 +236,8 @@ export function CommandInput({
   onSlashCommand,
 }: CommandInputProps) {
   const [value, setValue] = useState("");
+  const [resetKey, setResetKey] = useState(0);
+  const inputRef = useRef<BufferedInputHandle>(null);
   const [promptPulse, setPromptPulse] = useState(true);
   const [showSlashHelp, setShowSlashHelp] = useState(false);
 
@@ -270,6 +272,7 @@ export function CommandInput({
       if (key.tab && isVisible && suggestion) {
         const newValue = accept();
         setValue(newValue);
+        inputRef.current?.setValue(newValue);
         return;
       }
 
@@ -282,6 +285,11 @@ export function CommandInput({
     { isActive: !isProcessing }
   );
 
+  const clearInput = useCallback(() => {
+    setValue("");
+    setResetKey((k) => k + 1);
+  }, []);
+
   const handleSubmit = useCallback(
     (input: string) => {
       if (!input.trim()) return;
@@ -292,23 +300,22 @@ export function CommandInput({
         const cmdName = parts[0].toLowerCase();
         const args = parts.slice(1);
 
-        // Find matching command
         const cmd = SLASH_COMMANDS.find(
           (c) => c.name === cmdName || c.aliases.includes(cmdName)
         );
 
         if (cmd && onSlashCommand) {
           onSlashCommand(cmd.name, args);
-          setValue("");
+          clearInput();
           return;
         }
       }
 
-      // Regular command
+      // Regular command — BufferedInput already cleared its buffer on Enter
       onSubmit(input);
-      setValue("");
+      clearInput();
     },
-    [onSubmit, onSlashCommand]
+    [onSubmit, onSlashCommand, clearInput]
   );
 
   // Get current step index
@@ -369,10 +376,11 @@ export function CommandInput({
         {/* Text input with ghost overlay */}
         <Box>
           <BufferedInput
-            value={value}
+            ref={inputRef}
             onChange={setValue}
             onSubmit={handleSubmit}
             placeholder={isProcessing ? "Queue a follow-up message..." : (isVisible ? "" : "Type a command or ask a question...")}
+            resetKey={resetKey}
           />
 
           {/* Ghost suggestion text */}

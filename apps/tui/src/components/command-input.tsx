@@ -410,16 +410,17 @@ function PromptIndicator({ pulse }: PromptIndicatorProps) {
   const [colorIndex, setColorIndex] = useState(0);
   const colors = ["cyan", "blue", "magenta", "cyan"];
 
+  // Only animate when pulse is true — prevents re-renders during idle
   useEffect(() => {
+    if (!pulse) return;
     const interval = setInterval(() => {
       setColorIndex((prev) => (prev + 1) % colors.length);
     }, 300);
-
     return () => clearInterval(interval);
-  }, []);
+  }, [pulse]);
 
   return (
-    <Text color={colors[colorIndex] as any} bold>
+    <Text color={pulse ? (colors[colorIndex] as any) : "cyan"} bold>
       {"\u276F"}
     </Text>
   );

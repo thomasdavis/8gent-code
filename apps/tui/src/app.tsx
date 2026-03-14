@@ -236,6 +236,24 @@ export function App({ initialCommand, args }: AppProps) {
   const [fancyHeader, setFancyHeader] = useState(false);
   const [showEnhancedStatus, setShowEnhancedStatus] = useState(true);
 
+  // Derived: pause cosmetic animations when idle to prevent re-renders
+  // that interfere with text selection. Animations only run during processing
+  // or for 3s after completion. User's Ctrl+A toggle overrides everything.
+  const [idleSince, setIdleSince] = useState<number | null>(null);
+  const animationsActive = showAnimations && (isProcessing || (idleSince !== null && Date.now() - idleSince < 3000));
+
+  // Track when processing stops
+  useEffect(() => {
+    if (!isProcessing) {
+      setIdleSince(Date.now());
+      // Force one more render after 3s to freeze animations
+      const timer = setTimeout(() => setIdleSince((prev) => prev), 3100);
+      return () => clearTimeout(timer);
+    } else {
+      setIdleSince(null);
+    }
+  }, [isProcessing]);
+
   // Performance metrics
   const [lastResponseTime, setLastResponseTime] = useState<number | undefined>();
   const [contextSize, setContextSize] = useState<number | undefined>();
@@ -1253,7 +1271,7 @@ export function App({ initialCommand, args }: AppProps) {
       {fancyHeader ? (
         <FancyHeader isProcessing={isProcessing} />
       ) : (
-        <Header isProcessing={isProcessing} showAnimations={showAnimations} />
+        <Header isProcessing={isProcessing} showAnimations={animationsActive} />
       )}
 
       {/* Main content area with optional process sidebar on right */}
@@ -1352,7 +1370,7 @@ export function App({ initialCommand, args }: AppProps) {
             onSubmit={handleSubmit}
             isProcessing={isProcessing}
             processingStage={processingStage}
-            showAnimations={showAnimations}
+            showAnimations={animationsActive}
             activeTool={activeTool}
             stepCount={stepCount}
             toolCount={toolCount}
@@ -1424,14 +1442,14 @@ export function App({ initialCommand, args }: AppProps) {
           }
           planStepsCompleted={toolCount}
           planStepsTotal={stepCount}
-          showAnimations={showAnimations}
+          showAnimations={animationsActive}
           adhdMode={adhdMode}
         />
       ) : (
         <StatusBar
           tokensSaved={totalTokens}
           status={status}
-          showAnimations={showAnimations}
+          showAnimations={animationsActive}
           soundEnabled={soundEnabled}
         />
       )}
